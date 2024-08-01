@@ -3,11 +3,14 @@ import os
 import pandas as pd
 import xmltodict
 import json
-from database import engine
+from database import connect_to_db, get_engine
+from file_service import FileService
 
-def save_xmls():
+PROD = False
+
+def read_and_convert_xml(extract_dir, client_id):
     # Directory containing XML files
-    xml_dir = 'xml'
+    xml_dir = extract_dir
     nf = []
 
     for root, dirs, files in os.walk(xml_dir):
@@ -38,6 +41,7 @@ def save_xmls():
                                     else 'nao informado',
                         'content_json': json.dumps(content_json),
                         'content_xml': content_xml,
+                        'client_id': client_id
                     })
                 else:                       
                     nf_json = content_json['nfeProc']['NFe'] if 'nfeProc' in content_json else content_json['NFe']
@@ -75,36 +79,63 @@ def save_xmls():
                             else '',
                         'email_destinatario': nf_json['infNFe']['dest']['email']
                             if 'email' in nf_json['infNFe']['dest']
-                            else ''
+                            else '',
+                        'client_id': client_id
                     })
-                
-    print('------------------------')
-    print('Total de nfs:'+ str(len(nf)))
-    df = pd.DataFrame(nf)
-    
-    # Define the chunk size
-    chunksize = 1
-    engx = engine
-    
-    # Insert data into the database in chunks using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = []
-        for i in range(0, len(df), chunksize):
-            chunk = df.iloc[i:i+chunksize]
-            futures.append(executor.submit(insert_chunk, chunk, i, engx))
-
-        for future in futures:
-            future.result()
-    
-    print('------------------------')
-    print("All chunks inserted.")
-    
+    return nf
 
 def insert_chunk(chunk, i, eng):
     try:
         chunk.to_sql('nf', eng, schema='cbx', if_exists='append', index=False)
     except Exception as ex:
         print(f'Position: {i} \nError inserting chunk: {ex.args}')
+
+def get_all_keys_nf():
+    conn = connect_to_db(prod=PROD)
+    cur = conn.cursor()
     
+    query = f" SELECT key_nf FROM cbx.nf "
     
+    cur.execute(query)
+    rows = cur.fetchall()
+    
+    keys = [row[0] for row in rows]
+    return keys
+
+def save_xmls():
+    fileService = FileService()
+    extract_dir = fileService.extract_zip('zip')
+    #extract_dir = 'extract/zip/cdacdb89-63b0-4fd0-8b68-76e4885ba85f'
+    nf = read_and_convert_xml(extract_dir, client_id=1)
+                
+    print('------------------------')
+    print('Total de nfs disponíveis para inserir no banco de dados: '+ str(len(nf)))
+    df = pd.DataFrame(nf)
+    
+    keys = get_all_keys_nf()
+    keys_set = set(keys)
+    print('------------------------')
+    print('Total de notas existentes no banco de dados: '+ str(len(keys)))
+
+    engine = get_engine(prod=PROD)
+        
+    # Define the chunk size
+    chunk_size = 5000
+    
+    df_new = df[~df['key_nf'].isin(keys_set)]
+    print('Total de notas que serão inseridas no banco de dados: '+ str(len(df_new)))
+          
+    # Insert data into the database in chunks using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futures = []
+        for i in range(0, len(df_new), chunk_size):
+            chunk = df_new.iloc[i:i+chunk_size]
+            futures.append(executor.submit(insert_chunk, chunk, i, engine))
+
+        for future in futures:
+            future.result()
+    
+    print('------------------------')
+    print("All nfs inserted.")
+
 save_xmls()
